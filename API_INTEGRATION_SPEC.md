@@ -1,10 +1,34 @@
-# AI Trip Planner - Real API Integration Specification
+# AI Surf Trip Planner - Real API Integration Specification
 
 ## Overview
-This document outlines the implementation plan for replacing placeholder tools with real API integrations to provide actual, up-to-date travel information.
+This document outlines future plans for integrating real surf forecast APIs to provide actual, up-to-date surf conditions and swell data. Currently, the system uses LLM fallback for all surf information.
 
 ## Current State
-All tools currently return deterministic placeholder strings. The LLM generates itineraries based solely on its training data, using tools only as semantic markers for workflow structure.
+All surf tools use LLM fallback with optional web search (Tavily/SerpAPI). The system generates surf trip itineraries based on LLM knowledge with graceful degradation patterns. Future enhancements could integrate real-time surf forecast APIs.
+
+## Future Surf-Specific API Integrations
+
+### 1. Surf Forecast APIs
+
+**Surfline API**
+- Real-time surf forecasts, swell data, wind conditions
+- Wave heights, periods, directions
+- Tide information and charts
+- Surf cams for live conditions
+- Cost: Subscription-based
+
+**Magicseaweed API**
+- Global surf forecasts
+- Swell and wind data
+- Ratings and crowd info
+- Cost: Free tier available with limits
+
+**Stormglass Marine Weather API**
+- Wave height, period, direction
+- Wind speed and direction
+- Water temperature
+- Tide data
+- Cost: Free tier: 10 requests/day
 
 ## Proposed API Integrations
 

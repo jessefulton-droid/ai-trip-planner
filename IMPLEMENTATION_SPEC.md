@@ -1,33 +1,36 @@
-# AI Trip Planner - Implementation Specification
+# AI Surf Trip Planner - Implementation Specification
 
 ## Overview
-This document outlines the architecture improvements and fixes applied to the AI Trip Planner backend system, transforming it from a sequential agent execution model to a parallel execution model with proper tracing.
+This document outlines the architecture of the AI Surf Trip Planner backend system, a specialized multi-agent system for planning perfect surf trips with parallel agent execution and comprehensive tracing.
 
 ## System Architecture
 
 ### Agent Graph Structure
-The system uses LangGraph to orchestrate four specialized agents that work together to create personalized travel itineraries:
+The system uses LangGraph to orchestrate four specialized surf agents that work together to create personalized surf trip itineraries:
 
-1. **Research Agent** - Gathers essential destination information
-2. **Budget Agent** - Analyzes costs and budget considerations  
-3. **Local Agent** - Suggests authentic local experiences
-4. **Itinerary Agent** - Synthesizes all inputs into a cohesive travel plan
+1. **Surf Spot Research Agent** - Gathers surf conditions, break characteristics, forecasts
+2. **Surf Budget Agent** - Analyzes costs including board rentals, lessons, accommodation
+3. **Local Surf Culture Agent** - Provides surf etiquette, local scene, secret spots
+4. **Surf Trip Itinerary Agent** - Synthesizes all inputs into session plans with tide timing
 
 ### Execution Flow
 ```
-     START
-       |
-   [Parallel]
-   /   |   \
-  /    |    \
-Research Budget Local
-  \    |    /
-   \   |   /
-   [Converge]
-       |
-   Itinerary
-       |
-      END
+       START
+         |
+     [Parallel]
+     /   |   \
+    /    |    \
+Surf   Surf   Local
+Spot   Budget  Surf
+Research       Culture
+    \    |    /
+     \   |   /
+    [Converge]
+         |
+    Surf Trip
+    Itinerary
+         |
+        END
 ```
 
 ## Key Implementation Changes

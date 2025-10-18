@@ -1,23 +1,23 @@
-# AI Trip Planner
+# AI Surf Trip Planner
 
-A **production-ready multi-agent system** built for learning and customization. This repo demonstrates three essential AI engineering patterns that students can study, modify, and adapt for their own use cases.
+A **production-ready multi-agent system** for planning perfect surf trips. This repo demonstrates three essential AI engineering patterns that students can study, modify, and adapt for their own use cases - now specialized for surf travel planning.
 
 ## What You'll Learn
 
-- 🤖 **Multi-Agent Orchestration**: 4 specialized agents running in parallel using LangGraph
-- 🔍 **RAG (Retrieval-Augmented Generation)**: Vector search over curated data with fallback strategies
+- 🤖 **Multi-Agent Orchestration**: 4 specialized surf agents running in parallel using LangGraph
+- 🔍 **RAG (Retrieval-Augmented Generation)**: Vector search over 25 world-class surf spots with fallback strategies
 - 🌐 **API Integration**: Real-time web search with graceful degradation (LLM fallback)
 - 📊 **Observability**: Production tracing with Arize for debugging and evaluation
-- 🛠️ **Composable Architecture**: Easily adapt from "trip planner" to your own agent system
+- 🏄 **Surf-Specific Intelligence**: Break analysis, swell forecasts, surf etiquette, and session planning
 
-**Perfect for:** Students learning to build, evaluate, and deploy agentic AI systems.
+**Perfect for:** Learning agentic AI systems through a practical surf trip planning application.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         User Request                             │
-│                    (destination, duration, interests)            │
+│                      Surfer's Request                            │
+│         (surf destination, duration, skill, preferences)         │
 └────────────────────────────────┬────────────────────────────────┘
                                  │
                     ┌────────────▼────────────┐
@@ -33,27 +33,29 @@ A **production-ready multi-agent system** built for learning and customization. 
         ┌────────────────────────┼────────────────────────┐
         │                        │                        │
    ┌────▼─────┐           ┌─────▼──────┐         ┌──────▼─────┐
-   │ Research │           │   Budget   │         │   Local    │
-   │  Agent   │           │   Agent    │         │   Agent    │
+   │Surf Spot │           │Surf Budget │         │Local Surf  │
+   │ Research │           │   Agent    │         │ Culture    │
    └────┬─────┘           └─────┬──────┘         └──────┬─────┘
         │                        │                        │
         │ Tools:                 │ Tools:                 │ Tools + RAG:
-        │ • essential_info       │ • budget_basics        │ • local_flavor
-        │ • weather_brief        │ • attraction_prices    │ • hidden_gems
-        │ • visa_brief           │                        │ • Vector search
-        │                        │                        │   (90+ guides)
+        │ • surf_spot_info       │ • surf_trip_budget     │ • local_surf_scene
+        │ • surf_forecast_brief  │ • surf_services_pricing│ • surf_etiquette
+        │ • visa_surf_gear_brief │                        │ • secret_spots
+        │                        │                        │ • Vector search
+        │                        │                        │   (25 surf spots)
         │                        │                        │
         └────────────────────────┼────────────────────────┘
                                  │
                             ┌────▼─────┐
+                            │Surf Trip │
                             │Itinerary │
                             │  Agent   │
-                            │(Synthesis)│
                             └────┬─────┘
                                  │
                     ┌────────────▼────────────┐
-                    │   Final Itinerary       │
-                    │   + Tool Call Metadata  │
+                    │  Surf Trip Itinerary    │
+                    │  + Session Timing       │
+                    │  + Tool Call Metadata   │
                     └─────────────────────────┘
 
 All agents, tools, and LLM calls → Arize Observability Platform
@@ -68,14 +70,14 @@ All agents, tools, and LLM calls → Arize Observability Platform
    - Test API: `python "test scripts/test_api.py"`
 
 2. **Observe & Understand** (30 min)
-   - Make a few trip planning requests
+   - Make surf trip planning requests (try "Pipeline, Hawaii" or "J-Bay, South Africa")
    - View traces in Arize dashboard
-   - Understand agent execution flow and tool calls
+   - Understand surf agent execution flow and tool calls
 
 3. **Experiment with Prompts** (30 min)
-   - Modify agent prompts in `backend/main.py`
-   - Change tool descriptions
-   - See how it affects outputs
+   - Modify surf agent prompts in `backend/main.py`
+   - Change surf tool descriptions
+   - See how it affects surf itineraries
 
 ### 🚀 Intermediate Path
 1. **Enable Advanced Features** (20 min)
@@ -84,29 +86,29 @@ All agents, tools, and LLM calls → Arize Observability Platform
    - Compare results with/without these features
 
 2. **Add Custom Data** (45 min)
-   - Add your own city to `backend/data/local_guides.json`
+   - Add your own surf spot to `backend/data/surf_spots.json`
    - Test RAG retrieval with your data
    - Understand fallback strategies
 
 3. **Create a New Tool** (1 hour)
-   - Add a new tool (e.g., `restaurant_finder`)
-   - Integrate it into an agent
+   - Add a new tool (e.g., `tide_calculator`, `board_recommender`)
+   - Integrate it into a surf agent
    - Test and trace the new tool calls
 
 ### 💪 Advanced Path
 1. **Change the Domain** (2-3 hours)
    - Use Cursor AI to help transform the system
-   - Example: Change from "trip planner" to "PRD generator"
+   - Example: Change from "surf trip planner" to another specialized domain
    - Modify state, agents, and tools for your use case
 
 2. **Add a New Agent** (2 hours)
-   - Create a 5th agent (e.g., "activities planner")
+   - Create a 5th agent (e.g., "surf gear specialist", "tide analyzer")
    - Update the LangGraph workflow
    - Test parallel vs sequential execution
 
 3. **Implement Evaluations** (2 hours)
    - Use `test scripts/synthetic_data_gen.py` as a base
-   - Create evaluation criteria for your domain
+   - Create evaluation criteria for surf trip quality
    - Set up automated evals in Arize
 
 ## Common Use Cases (Built by Students)
@@ -179,8 +181,9 @@ docker-compose up --build
 ```
 
 ## Project Structure
-- `backend/`: FastAPI app (`main.py`), LangGraph agents, tracing hooks.
-- `frontend/index.html`: Minimal static UI served by backend at `/`.
+- `backend/`: FastAPI app (`main.py`), LangGraph surf agents, tracing hooks.
+- `backend/data/surf_spots.json`: Curated database of 25 world-class surf destinations.
+- `frontend/index.html`: Surf trip planner UI served by backend at `/`.
 - `optional/airtable/`: Airtable integration (optional, not on critical path).
 - `test scripts/`: `test_api.py`, `synthetic_data_gen.py` for quick checks/evals.
 - Root: `start.sh`, `docker-compose.yml`, `README.md`.
@@ -191,10 +194,10 @@ docker-compose up --build
 - Synthetic evals: `python "test scripts"/synthetic_data_gen.py --base-url http://localhost:8000 --count 12`
 
 ## API
-- POST `/plan-trip` → returns a generated itinerary.
+- POST `/plan-trip` → returns a generated surf trip itinerary.
   Example body:
   ```json
-  {"destination":"Tokyo, Japan","duration":"7 days","budget":"$2000","interests":"food, culture"}
+  {"destination":"Pipeline, North Shore, Hawaii","duration":"7 days","budget":"moderate","surf_preferences":"reef breaks, barrels","skill_level":"advanced"}
   ```
 - GET `/health` → simple status.
 
@@ -203,28 +206,30 @@ docker-compose up --build
 
 ## Optional Features
 
-### RAG: Vector Search for Local Guides
+### RAG: Vector Search for Surf Spots
 
-The local agent can use vector search to retrieve curated local experiences from a database of 90+ real-world recommendations:
+The local surf culture agent can use vector search to retrieve curated surf spot information from a database of 25 world-class destinations:
 
 - **Enable**: Set `ENABLE_RAG=1` in your `.env` file
 - **Requirements**: Requires `OPENAI_API_KEY` for embeddings
-- **Data**: Uses curated experiences from `backend/data/local_guides.json`
-- **Benefits**: Provides grounded, cited recommendations with sources
+- **Data**: Uses curated surf spots from `backend/data/surf_spots.json`
+- **Coverage**: Pipeline, J-Bay, Teahupo'o, Uluwatu, Trestles, Mentawais, and 19 more world-class breaks
+- **Benefits**: Provides grounded, cited surf recommendations with break characteristics
 - **Learning**: Great example of production RAG patterns with fallback strategies
 
 When disabled (default), the local agent uses LLM-generated responses.
 
 See `RAG.md` for detailed documentation.
 
-### Web Search: Real-Time Tool Data
+### Web Search: Real-Time Surf Data
 
-Tools can call real web search APIs (Tavily or SerpAPI) for up-to-date travel information:
+Tools can call real web search APIs (Tavily or SerpAPI) for up-to-date surf information:
 
 - **Enable**: Add `TAVILY_API_KEY` or `SERPAPI_API_KEY` to your `.env` file
-- **Benefits**: Real-time data for weather, attractions, prices, customs, etc.
+- **Benefits**: Real-time data for surf forecasts, swell conditions, break reports, surf services pricing, etc.
 - **Fallback**: Without API keys, tools automatically fall back to LLM-generated responses
 - **Learning**: Demonstrates graceful degradation and multi-tier fallback patterns
+- **Future**: Could integrate Surfline, Magicseaweed, or Stormglass APIs for real surf forecasts
 
 Recommended: Tavily (free tier: 1000 searches/month) - https://tavily.com
 

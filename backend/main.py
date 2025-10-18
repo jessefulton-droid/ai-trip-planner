@@ -57,7 +57,8 @@ class TripRequest(BaseModel):
     destination: str
     duration: str
     budget: Optional[str] = None
-    interests: Optional[str] = None
+    surf_preferences: Optional[str] = None  # reef breaks, point breaks, barrel hunting, mellow cruising
+    skill_level: Optional[str] = None  # intermediate, advanced, expert
     travel_style: Optional[str] = None
     # Optional fields for enhanced session tracking and observability
     user_input: Optional[str] = None
@@ -84,7 +85,7 @@ def _init_llm():
                 tool_calls: List[Dict[str, Any]] = []
             return _Msg()
 
-    if os.getenv("TEST_MODE"):
+    if os.getenv("TEST_MODE", "0").lower() in {"1", "true", "yes"}:
         return _Fake()
     if os.getenv("OPENAI_API_KEY"):
         return ChatOpenAI(model="gpt-3.5-turbo", temperature=0.7, max_tokens=1500)
@@ -108,9 +109,9 @@ llm = _init_llm()
 ENABLE_RAG = os.getenv("ENABLE_RAG", "0").lower() not in {"0", "false", "no"}
 
 
-# RAG helper: Load curated local guides as LangChain documents
+# RAG helper: Load curated surf spots as LangChain documents
 def _load_local_documents(path: Path) -> List[Document]:
-    """Load local guides JSON and convert to LangChain Documents."""
+    """Load surf spots JSON and convert to LangChain Documents."""
     if not path.exists():
         return []
     try:
@@ -121,24 +122,29 @@ def _load_local_documents(path: Path) -> List[Document]:
     docs: List[Document] = []
     for row in raw:
         description = row.get("description")
-        city = row.get("city")
-        if not description or not city:
+        destination = row.get("destination")
+        break_name = row.get("break_name", "")
+        if not description or not destination:
             continue
-        interests = row.get("interests", []) or []
+        skill_levels = row.get("skill_levels", []) or []
+        wave_type = row.get("wave_type", "")
         metadata = {
-            "city": city,
-            "interests": interests,
+            "destination": destination,
+            "break_name": break_name,
+            "skill_levels": skill_levels,
+            "wave_type": wave_type,
+            "best_season": row.get("best_season", ""),
             "source": row.get("source"),
         }
-        # Prefix city + interests in content so embeddings capture location context
-        interest_text = ", ".join(interests) if interests else "general travel"
-        content = f"City: {city}\nInterests: {interest_text}\nGuide: {description}"
+        # Prefix destination + wave type in content so embeddings capture location and surf context
+        skill_text = ", ".join(skill_levels) if skill_levels else "all levels"
+        content = f"Destination: {destination}\nBreak: {break_name}\nWave Type: {wave_type}\nSkill Levels: {skill_text}\nDescription: {description}"
         docs.append(Document(page_content=content, metadata=metadata))
     return docs
 
 
 class LocalGuideRetriever:
-    """Retrieves curated local experiences using vector similarity search.
+    """Retrieves curated surf spots using vector similarity search.
     
     This class demonstrates production RAG patterns for students:
     - Vector embeddings for semantic search
@@ -147,10 +153,10 @@ class LocalGuideRetriever:
     """
     
     def __init__(self, data_path: Path):
-        """Initialize retriever with local guides data.
+        """Initialize retriever with surf spots data.
         
         Args:
-            data_path: Path to local_guides.json file
+            data_path: Path to surf_spots.json file
         """
         self._docs = _load_local_documents(data_path)
         self._embeddings: Optional[OpenAIEmbeddings] = None
@@ -174,12 +180,12 @@ class LocalGuideRetriever:
         """Check if any documents were loaded."""
         return not self._docs
 
-    def retrieve(self, destination: str, interests: Optional[str], *, k: int = 3) -> List[Dict[str, Any]]:
-        """Retrieve top-k relevant local guides for a destination.
+    def retrieve(self, destination: str, surf_preferences: Optional[str], *, k: int = 3) -> List[Dict[str, Any]]:
+        """Retrieve top-k relevant surf spots for a destination.
         
         Args:
-            destination: City or destination name
-            interests: Comma-separated interests (e.g., "food, art")
+            destination: Surf destination name
+            surf_preferences: Comma-separated preferences (e.g., "reef breaks, barrels")
             k: Number of results to return
             
         Returns:
@@ -190,18 +196,18 @@ class LocalGuideRetriever:
 
         # Use vector search if available, otherwise fall back to keywords
         if not self._vectorstore:
-            return self._keyword_fallback(destination, interests, k=k)
+            return self._keyword_fallback(destination, surf_preferences, k=k)
 
         query = destination
-        if interests:
-            query = f"{destination} with interests {interests}"
+        if surf_preferences:
+            query = f"{destination} surfing {surf_preferences}"
         
         try:
             # LangChain retriever ensures embeddings + searches are traced
             retriever = self._vectorstore.as_retriever(search_kwargs={"k": max(k, 4)})
             docs = retriever.invoke(query)
         except Exception:
-            return self._keyword_fallback(destination, interests, k=k)
+            return self._keyword_fallback(destination, surf_preferences, k=k)
 
         # Format results with metadata and scores
         top_docs = docs[:k]
@@ -219,27 +225,28 @@ class LocalGuideRetriever:
             })
 
         if not results:
-            return self._keyword_fallback(destination, interests, k=k)
+            return self._keyword_fallback(destination, surf_preferences, k=k)
         return results
 
-    def _keyword_fallback(self, destination: str, interests: Optional[str], *, k: int) -> List[Dict[str, Any]]:
+    def _keyword_fallback(self, destination: str, surf_preferences: Optional[str], *, k: int) -> List[Dict[str, Any]]:
         """Simple keyword-based retrieval when embeddings unavailable.
         
         This demonstrates graceful degradation for students learning about
         fallback strategies in production systems.
         """
         dest_lower = destination.lower()
-        interest_terms = [part.strip().lower() for part in (interests or "").split(",") if part.strip()]
+        pref_terms = [part.strip().lower() for part in (surf_preferences or "").split(",") if part.strip()]
 
         def _score(doc: Document) -> int:
             score = 0
-            city_match = doc.metadata.get("city", "").lower()
-            # Match city name
-            if dest_lower and dest_lower.split(",")[0] in city_match:
+            dest_match = doc.metadata.get("destination", "").lower()
+            # Match destination name
+            if dest_lower and dest_lower.split(",")[0] in dest_match:
                 score += 2
-            # Match interests
-            for term in interest_terms:
-                if term and term in " ".join(doc.metadata.get("interests") or []).lower():
+            # Match surf preferences
+            for term in pref_terms:
+                wave_type = doc.metadata.get("wave_type", "").lower()
+                if term and (term in wave_type or term in " ".join(doc.metadata.get("skill_levels") or []).lower()):
                     score += 1
                 if term and term in doc.page_content.lower():
                     score += 1
@@ -262,7 +269,7 @@ class LocalGuideRetriever:
 
 # Initialize retriever at module level (loads data once at startup)
 _DATA_DIR = Path(__file__).parent / "data"
-GUIDE_RETRIEVER = LocalGuideRetriever(_DATA_DIR / "local_guides.json")
+GUIDE_RETRIEVER = LocalGuideRetriever(_DATA_DIR / "surf_spots.json")
 
 
 # Search API configuration and helpers
@@ -369,117 +376,117 @@ def _with_prefix(prefix: str, summary: str) -> str:
     return _compact(text)
 
 
-# Tools with real API calls + LLM fallback (graceful degradation pattern)
+# Surf-specific tools with LLM fallback (graceful degradation pattern)
 @tool
-def essential_info(destination: str) -> str:
-    """Return essential destination info like weather, sights, and etiquette."""
-    query = f"{destination} travel essentials weather best time top attractions etiquette language currency safety"
+def surf_spot_info(destination: str) -> str:
+    """Return essential surf spot information including break type, wave characteristics, and best swell direction."""
+    query = f"{destination} surf break type wave characteristics swell direction best season surf conditions"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} essentials", summary)
+        return _with_prefix(f"{destination} surf spot info", summary)
     
     # LLM fallback when no search API is configured
-    instruction = f"Summarize the climate, best visit time, standout sights, customs, language, currency, and safety tips for {destination}."
+    instruction = f"Summarize the break type (reef/point/beach), wave characteristics, best swell direction, ideal wave size, best season, and crowd levels for surfing at {destination}."
     return _llm_fallback(instruction)
 
 
 @tool
-def budget_basics(destination: str, duration: str) -> str:
-    """Return high-level budget categories for a given destination and duration."""
-    query = f"{destination} travel budget average daily costs {duration}"
+def surf_trip_budget(destination: str, duration: str) -> str:
+    """Return surf trip budget including board rentals, lessons, accommodation, and surf-specific costs."""
+    query = f"{destination} surf trip budget board rental wetsuit costs surf lessons {duration}"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} budget {duration}", summary)
+        return _with_prefix(f"{destination} surf budget {duration}", summary)
     
-    instruction = f"Outline lodging, meals, transport, activities, and extra costs for a {duration} trip to {destination}."
+    instruction = f"Outline accommodation near surf breaks, meals, board rentals, wetsuit costs, surf lessons/guides, wax and accessories, transport to breaks, and other surf-specific costs for a {duration} surf trip to {destination}."
     return _llm_fallback(instruction)
 
 
 @tool
-def local_flavor(destination: str, interests: Optional[str] = None) -> str:
-    """Suggest authentic local experiences matching optional interests."""
-    focus = interests or "local culture"
-    query = f"{destination} authentic local experiences {focus}"
+def local_surf_scene(destination: str, surf_preferences: Optional[str] = None) -> str:
+    """Discover the local surf culture, scene, and community at the destination."""
+    focus = surf_preferences or "local surf culture"
+    query = f"{destination} surf culture local scene surf community {focus}"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} {focus}", summary)
+        return _with_prefix(f"{destination} surf scene", summary)
     
-    instruction = f"Recommend authentic local experiences in {destination} that highlight {focus}."
+    instruction = f"Describe the local surf culture, community vibe, notable surf shops and shapers, local competitions or events, and surf scene that matches {focus} in {destination}."
     return _llm_fallback(instruction)
 
 
 @tool
-def day_plan(destination: str, day: int) -> str:
-    """Return a simple day plan outline for a specific day number."""
-    query = f"{destination} day {day} itinerary highlights"
+def surf_session_plan(destination: str, day: int) -> str:
+    """Return a surf session plan for a specific day including tide timing and backup spots."""
+    query = f"{destination} surf day {day} session plan tides best time"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"Day {day} in {destination}", summary)
+        return _with_prefix(f"Day {day} surf sessions in {destination}", summary)
     
-    instruction = f"Outline key activities for day {day} in {destination}, covering morning, afternoon, and evening."
+    instruction = f"Outline surf sessions for day {day} in {destination}, including dawn patrol timing, optimal tide windows, backup spots if conditions aren't ideal, and non-surf activities between sessions."
     return _llm_fallback(instruction)
 
 
 # Additional simple tools per agent (to mirror original multi-tool behavior)
 @tool
-def weather_brief(destination: str) -> str:
-    """Return a brief weather summary for planning purposes."""
-    query = f"{destination} weather forecast travel season temperatures rainfall"
+def surf_forecast_brief(destination: str) -> str:
+    """Return surf forecast including swell size, direction, wind conditions, and tides."""
+    query = f"{destination} surf forecast swell size direction wind conditions tides"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} weather", summary)
+        return _with_prefix(f"{destination} surf forecast", summary)
     
-    instruction = f"Give a weather brief for {destination} noting season, temperatures, rainfall, humidity, and packing guidance."
+    instruction = f"Provide a surf forecast for {destination} including expected swell size and direction, wind conditions (offshore/onshore), tide patterns, water temperature, and wetsuit recommendations."
     return _llm_fallback(instruction)
 
 
 @tool
-def visa_brief(destination: str) -> str:
-    """Return a brief visa guidance for travel planning."""
-    query = f"{destination} tourist visa requirements entry rules"
+def visa_and_surf_gear_brief(destination: str) -> str:
+    """Return visa guidance and surfboard/gear customs information for travel planning."""
+    query = f"{destination} tourist visa requirements surfboard customs import rules"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} visa", summary)
+        return _with_prefix(f"{destination} visa & surf gear", summary)
     
-    instruction = f"Provide a visa guidance summary for visiting {destination}, including advice to confirm with the relevant embassy."
+    instruction = f"Provide visa guidance and surfboard customs rules for {destination}, including any fees or restrictions on bringing surf equipment, and advice to confirm with the relevant embassy."
     return _llm_fallback(instruction)
 
 
 @tool
-def attraction_prices(destination: str, attractions: Optional[List[str]] = None) -> str:
-    """Return pricing information for attractions."""
-    items = attractions or ["popular attractions"]
+def surf_services_pricing(destination: str, services: Optional[List[str]] = None) -> str:
+    """Return pricing information for surf lessons, guides, boat trips, and rentals."""
+    items = services or ["surf lessons", "board rentals", "guided sessions"]
     focus = ", ".join(items)
-    query = f"{destination} attraction ticket prices {focus}"
+    query = f"{destination} surf lesson prices board rental costs {focus}"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} attraction prices", summary)
+        return _with_prefix(f"{destination} surf services pricing", summary)
     
-    instruction = f"Share typical ticket prices and savings tips for attractions such as {focus} in {destination}."
+    instruction = f"Share typical costs for surf services such as {focus} in {destination}, including daily/weekly rental rates, lesson packages, and boat trip fees."
     return _llm_fallback(instruction)
 
 
 @tool
-def local_customs(destination: str) -> str:
-    """Return cultural etiquette and customs information."""
-    query = f"{destination} cultural etiquette travel customs"
+def surf_etiquette(destination: str) -> str:
+    """Return surf lineup etiquette, local rules, and respect protocols for the destination."""
+    query = f"{destination} surf etiquette lineup rules localism respect protocols"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} customs", summary)
+        return _with_prefix(f"{destination} surf etiquette", summary)
     
-    instruction = f"Summarize key etiquette and cultural customs travelers should know before visiting {destination}."
+    instruction = f"Summarize surf lineup etiquette, local rules, how to respect locals, localism awareness, priority rules, and cultural surf customs that intermediate/advanced surfers should know before surfing {destination}."
     return _llm_fallback(instruction)
 
 
 @tool
-def hidden_gems(destination: str) -> str:
-    """Return lesser-known attractions and experiences."""
-    query = f"{destination} hidden gems local secrets lesser known spots"
+def secret_spots(destination: str) -> str:
+    """Return lesser-known surf breaks and local spots for experienced surfers."""
+    query = f"{destination} secret surf spots lesser known breaks local spots"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} hidden gems", summary)
+        return _with_prefix(f"{destination} secret surf spots", summary)
     
-    instruction = f"List lesser-known attractions or experiences that feel like hidden gems in {destination}."
+    instruction = f"Describe lesser-known surf breaks and local spots in {destination} that are suitable for intermediate/advanced surfers who respect local etiquette and want to avoid crowds."
     return _llm_fallback(instruction)
 
 
@@ -496,15 +503,15 @@ def travel_time(from_location: str, to_location: str, mode: str = "public") -> s
 
 
 @tool
-def packing_list(destination: str, duration: str, activities: Optional[List[str]] = None) -> str:
-    """Return packing recommendations for the trip."""
-    acts = ", ".join(activities or ["sightseeing"])
-    query = f"what to pack for {destination} {duration} {acts}"
+def surf_packing_list(destination: str, duration: str, skill_level: Optional[str] = None) -> str:
+    """Return surf-specific packing recommendations including boards, wax, wetsuit, and gear."""
+    level = skill_level or "intermediate"
+    query = f"surf packing list {destination} {duration} wetsuit board wax {level}"
     summary = _search_api(query)
     if summary:
-        return _with_prefix(f"{destination} packing", summary)
+        return _with_prefix(f"{destination} surf packing", summary)
     
-    instruction = f"Suggest packing essentials for a {duration} trip to {destination} focused on {acts}."
+    instruction = f"Suggest surf packing essentials for a {duration} surf trip to {destination} for {level} surfers, including board recommendations, wetsuit thickness, wax type, leash, repair kit, rash guards, booties, and other surf-specific gear."
     return _llm_fallback(instruction)
 
 
@@ -522,25 +529,25 @@ def research_agent(state: TripState) -> TripState:
     req = state["trip_request"]
     destination = req["destination"]
     prompt_t = (
-        "You are a research assistant.\n"
-        "Gather essential information about {destination}.\n"
-        "Use tools to get weather, visa, and essential info, then summarize."
+        "You are a surf spot research specialist.\n"
+        "Gather essential surf information about {destination}.\n"
+        "Use tools to get surf conditions, forecasts, break characteristics, and travel requirements for surfers, then summarize."
     )
     vars_ = {"destination": destination}
     
     messages = [SystemMessage(content=prompt_t.format(**vars_))]
-    tools = [essential_info, weather_brief, visa_brief]
+    tools = [surf_spot_info, surf_forecast_brief, visa_and_surf_gear_brief]
     agent = llm.bind_tools(tools)
     
     calls: List[Dict[str, Any]] = []
     tool_results = []
     
     # Agent metadata and prompt template instrumentation
-    with using_attributes(tags=["research", "info_gathering"]):
+    with using_attributes(tags=["surf_research", "spot_intel"]):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
-                current_span.set_attribute("metadata.agent_type", "research")
+                current_span.set_attribute("metadata.agent_type", "surf_research")
                 current_span.set_attribute("metadata.agent_node", "research_agent")
         
         with using_prompt_template(template=prompt_t, variables=vars_, version="v1"):
@@ -578,24 +585,24 @@ def budget_agent(state: TripState) -> TripState:
     destination, duration = req["destination"], req["duration"]
     budget = req.get("budget", "moderate")
     prompt_t = (
-        "You are a budget analyst.\n"
-        "Analyze costs for {destination} over {duration} with budget: {budget}.\n"
-        "Use tools to get pricing information, then provide a detailed breakdown."
+        "You are a surf trip budget specialist.\n"
+        "Analyze costs for a surf trip to {destination} over {duration} with budget: {budget}.\n"
+        "Use tools to get surf-specific pricing (board rentals, lessons, guides, accommodation near breaks), then provide a detailed breakdown."
     )
     vars_ = {"destination": destination, "duration": duration, "budget": budget}
     
     messages = [SystemMessage(content=prompt_t.format(**vars_))]
-    tools = [budget_basics, attraction_prices]
+    tools = [surf_trip_budget, surf_services_pricing]
     agent = llm.bind_tools(tools)
     
     calls: List[Dict[str, Any]] = []
     
     # Agent metadata and prompt template instrumentation
-    with using_attributes(tags=["budget", "cost_analysis"]):
+    with using_attributes(tags=["surf_budget", "cost_analysis"]):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
-                current_span.set_attribute("metadata.agent_type", "budget")
+                current_span.set_attribute("metadata.agent_type", "surf_budget")
                 current_span.set_attribute("metadata.agent_node", "budget_agent")
         
         with using_prompt_template(template=prompt_t, variables=vars_, version="v1"):
@@ -629,53 +636,55 @@ def budget_agent(state: TripState) -> TripState:
 def local_agent(state: TripState) -> TripState:
     req = state["trip_request"]
     destination = req["destination"]
-    interests = req.get("interests", "local culture")
+    surf_preferences = req.get("surf_preferences", "quality waves")
+    skill_level = req.get("skill_level", "intermediate")
     travel_style = req.get("travel_style", "standard")
     
-    # RAG: Retrieve curated local guides if enabled
+    # RAG: Retrieve curated surf spots if enabled
     context_lines = []
     if ENABLE_RAG:
-        retrieved = GUIDE_RETRIEVER.retrieve(destination, interests, k=3)
+        retrieved = GUIDE_RETRIEVER.retrieve(destination, surf_preferences, k=3)
         if retrieved:
-            context_lines.append("=== Curated Local Guides (from database) ===")
+            context_lines.append("=== Curated Surf Spots (from database) ===")
             for idx, item in enumerate(retrieved, 1):
                 content = item["content"]
                 source = item["metadata"].get("source", "Unknown")
                 context_lines.append(f"{idx}. {content}")
                 context_lines.append(f"   Source: {source}")
-            context_lines.append("=== End of Curated Guides ===\n")
+            context_lines.append("=== End of Curated Surf Spots ===\n")
     
     context_text = "\n".join(context_lines) if context_lines else ""
     
     prompt_t = (
-        "You are a local guide.\n"
-        "Find authentic experiences in {destination} for someone interested in: {interests}.\n"
-        "Travel style: {travel_style}. Use tools to gather local insights.\n"
+        "You are a local surf culture expert.\n"
+        "Find authentic surf experiences in {destination} for {skill_level} surfers who prefer: {surf_preferences}.\n"
+        "Travel style: {travel_style}. Use tools to gather local surf scene insights, etiquette, and secret spots.\n"
     )
     
     # Add retrieved context to prompt if available
     if context_text:
-        prompt_t += "\nRelevant curated experiences from our database:\n{context}\n"
+        prompt_t += "\nRelevant curated surf spots from our database:\n{context}\n"
     
     vars_ = {
         "destination": destination,
-        "interests": interests,
+        "surf_preferences": surf_preferences,
+        "skill_level": skill_level,
         "travel_style": travel_style,
         "context": context_text if context_text else "No curated context available.",
     }
     
     messages = [SystemMessage(content=prompt_t.format(**vars_))]
-    tools = [local_flavor, local_customs, hidden_gems]
+    tools = [local_surf_scene, surf_etiquette, secret_spots]
     agent = llm.bind_tools(tools)
     
     calls: List[Dict[str, Any]] = []
     
     # Agent metadata and prompt template instrumentation
-    with using_attributes(tags=["local", "local_experiences"]):
+    with using_attributes(tags=["surf_culture", "local_scene"]):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
-                current_span.set_attribute("metadata.agent_type", "local")
+                current_span.set_attribute("metadata.agent_type", "surf_culture")
                 current_span.set_attribute("metadata.agent_node", "local_agent")
                 if ENABLE_RAG and context_text:
                     current_span.set_attribute("metadata.rag_enabled", "true")
@@ -694,11 +703,11 @@ def local_agent(state: TripState) -> TripState:
         messages.append(res)
         messages.extend(tr["messages"])
         
-        synthesis_prompt = f"Create a curated list of authentic experiences for someone interested in {interests} with a {travel_style} approach."
+        synthesis_prompt = f"Create a curated list of surf experiences and local scene insights for {skill_level} surfers interested in {surf_preferences} with a {travel_style} approach."
         messages.append(SystemMessage(content=synthesis_prompt))
         
         # Instrument synthesis LLM call
-        synthesis_vars = {"interests": interests, "travel_style": travel_style, "destination": destination}
+        synthesis_vars = {"surf_preferences": surf_preferences, "skill_level": skill_level, "travel_style": travel_style, "destination": destination}
         with using_prompt_template(template=synthesis_prompt, variables=synthesis_vars, version="v1-synthesis"):
             final_res = llm.invoke(messages)
         out = final_res.content
@@ -712,16 +721,21 @@ def itinerary_agent(state: TripState) -> TripState:
     req = state["trip_request"]
     destination = req["destination"]
     duration = req["duration"]
+    skill_level = req.get("skill_level", "intermediate")
+    surf_preferences = req.get("surf_preferences", "quality waves")
     travel_style = req.get("travel_style", "standard")
     user_input = (req.get("user_input") or "").strip()
     
     prompt_parts = [
-        "Create a {duration} itinerary for {destination} ({travel_style}).",
+        "Create a {duration} surf trip itinerary for {destination} ({travel_style}).",
+        "Target surfer: {skill_level} level, prefers {surf_preferences}.",
+        "",
+        "Focus on optimal surf session timing (dawn patrol, tide windows), backup spots, and surf-friendly activities.",
         "",
         "Inputs:",
-        "Research: {research}",
-        "Budget: {budget}",
-        "Local: {local}",
+        "Surf Research: {research}",
+        "Surf Budget: {budget}",
+        "Local Surf Scene: {local}",
     ]
     if user_input:
         prompt_parts.append("User input: {user_input}")
@@ -730,6 +744,8 @@ def itinerary_agent(state: TripState) -> TripState:
     vars_ = {
         "duration": duration,
         "destination": destination,
+        "skill_level": skill_level,
+        "surf_preferences": surf_preferences,
         "travel_style": travel_style,
         "research": (state.get("research") or "")[:400],
         "budget": (state.get("budget") or "")[:400],
@@ -739,13 +755,14 @@ def itinerary_agent(state: TripState) -> TripState:
     
     # Add span attributes for better observability in Arize
     # NOTE: using_attributes must be OUTER context for proper propagation
-    with using_attributes(tags=["itinerary", "final_agent"]):
+    with using_attributes(tags=["surf_itinerary", "session_planning"]):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
                 current_span.set_attribute("metadata.itinerary", "true")
-                current_span.set_attribute("metadata.agent_type", "itinerary")
+                current_span.set_attribute("metadata.agent_type", "surf_itinerary")
                 current_span.set_attribute("metadata.agent_node", "itinerary_agent")
+                current_span.set_attribute("metadata.skill_level", skill_level)
                 if user_input:
                     current_span.set_attribute("metadata.user_input", user_input)
         
@@ -779,7 +796,7 @@ def build_graph():
     return g.compile()
 
 
-app = FastAPI(title="AI Trip Planner")
+app = FastAPI(title="AI Surf Trip Planner")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -800,7 +817,7 @@ def serve_frontend():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "service": "ai-trip-planner"}
+    return {"status": "healthy", "service": "ai-surf-trip-planner"}
 
 
 # Initialize tracing once at startup, not per request
@@ -809,7 +826,7 @@ if _TRACING:
         space_id = os.getenv("ARIZE_SPACE_ID")
         api_key = os.getenv("ARIZE_API_KEY")
         if space_id and api_key:
-            tp = register(space_id=space_id, api_key=api_key, project_name="ai-trip-planner")
+            tp = register(space_id=space_id, api_key=api_key, project_name="ai-surf-trip-planner")
             LangChainInstrumentor().instrument(tracer_provider=tp, include_chains=True, include_agents=True, include_tools=True)
             LiteLLMInstrumentor().instrument(tracer_provider=tp, skip_dep_check=True)
     except Exception:
