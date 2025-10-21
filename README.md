@@ -150,7 +150,9 @@ Students have successfully adapted this codebase for:
 2) Configure environment
 - Copy `backend/.env.example` to `backend/.env`.
 - Set one LLM key: `OPENAI_API_KEY=...` or `OPENROUTER_API_KEY=...`.
-- Optional: `ARIZE_SPACE_ID` and `ARIZE_API_KEY` for tracing.
+- **Recommended**: `ARIZE_SPACE_ID` and `ARIZE_API_KEY` for complete observability.
+  - See [ARIZE_SETUP.md](./ARIZE_SETUP.md) for quick setup guide
+  - See [ARIZE_OBSERVABILITY.md](./ARIZE_OBSERVABILITY.md) for complete docs
 
 3) Install dependencies
 ```bash
@@ -201,8 +203,79 @@ docker-compose up --build
   ```
 - GET `/health` → simple status.
 
-## Notes on Tracing (Optional)
-- If `ARIZE_SPACE_ID` and `ARIZE_API_KEY` are set, OpenInference exports spans for agents/tools/LLM calls. View at https://app.arize.com.
+## Arize AX Observability (Recommended)
+
+This application is fully instrumented with **Arize AX** for production-grade observability:
+
+### What You Get
+- 🎯 **Multi-Agent Workflow Visualization**: See all 4 agents (research, budget, local, itinerary) executing in parallel
+- 🤖 **LLM Tracing**: Track every prompt, completion, token usage, and latency
+- 🔧 **Tool Call Monitoring**: Debug which tools agents call and their results
+- 📊 **RAG Observability**: Visualize vector search, document retrieval, and scores
+- 👤 **Session Tracking**: Follow user journeys across multiple requests
+- ⚠️ **Error Analysis**: Get detailed exception traces with full context
+- ⏱️ **Performance Metrics**: Identify bottlenecks and optimize latency
+- 💰 **Cost Tracking**: Monitor token usage and LLM costs
+
+### Setup (5 minutes)
+
+1. Sign up at [https://app.arize.com](https://app.arize.com) (free tier available)
+2. Get your Space ID and API Key from Space Settings
+3. Add to `backend/.env`:
+   ```bash
+   ARIZE_SPACE_ID=your-space-id
+   ARIZE_API_KEY=your-api-key
+   ```
+4. Start the server - tracing is automatic!
+
+### Quick Start
+
+```bash
+# 1. Install dependencies
+cd backend && pip install -r requirements.txt
+
+# 2. Configure Arize credentials
+cp .env.example .env
+nano .env  # Add ARIZE_SPACE_ID and ARIZE_API_KEY
+
+# 3. Start server
+cd .. && ./start.sh
+
+# 4. Make a request
+curl -X POST http://localhost:8000/plan-trip \
+  -H "Content-Type: application/json" \
+  -d '{"destination": "Pipeline, Hawaii", "duration": "7 days", "session_id": "test-123"}'
+
+# 5. View trace at https://app.arize.com
+```
+
+### Documentation
+
+- **Quick Setup**: [ARIZE_SETUP.md](./ARIZE_SETUP.md) - Get started in 5 minutes
+- **Complete Guide**: [ARIZE_OBSERVABILITY.md](./ARIZE_OBSERVABILITY.md) - Full documentation
+
+### What's Instrumented
+
+✅ Auto-instrumentation via OpenInference:
+- LangChain/LangGraph workflows
+- OpenAI API calls
+- LiteLLM (for other providers)
+
+✅ Manual instrumentation for agents:
+- Proper OpenInference span kinds (AGENT, RETRIEVER, CHAIN)
+- Input/output tracking
+- Prompt template versioning
+- RAG document retrieval with scores
+- Error handling and status codes
+- Custom metadata and tags
+
+### View in Arize
+
+After making requests, explore your traces:
+1. Go to [app.arize.com](https://app.arize.com)
+2. Select your Space
+3. Find project: **ai-surf-trip-planner**
+4. View traces, analyze performance, test prompts in Playground
 
 ## Optional Features
 

@@ -11,13 +11,26 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
-# Minimal observability via Arize/OpenInference (optional)
+# Enhanced observability via Arize AX (OpenInference/OpenTelemetry)
 try:
     from arize.otel import register
     from openinference.instrumentation.langchain import LangChainInstrumentor
+    from openinference.instrumentation.openai import OpenAIInstrumentor
     from openinference.instrumentation.litellm import LiteLLMInstrumentor
-    from openinference.instrumentation import using_prompt_template, using_metadata, using_attributes
+    from openinference.instrumentation import (
+        using_prompt_template, 
+        using_metadata, 
+        using_attributes,
+        TraceConfig
+    )
+    from openinference.semconv.trace import (
+        SpanAttributes,
+        OpenInferenceSpanKindValues,
+        DocumentAttributes
+    )
     from opentelemetry import trace
+    from opentelemetry.trace import Status, StatusCode
+    import json as json_lib
     _TRACING = True
 except Exception:
     def using_prompt_template(**kwargs):  # type: ignore
@@ -39,6 +52,10 @@ except Exception:
             yield
         return _noop()
     _TRACING = False
+    SpanAttributes = None  # type: ignore
+    OpenInferenceSpanKindValues = None  # type: ignore
+    Status = None  # type: ignore
+    StatusCode = None  # type: ignore
 
 # LangGraph + LangChain
 from langgraph.graph import StateGraph, END, START
@@ -526,6 +543,15 @@ class TripState(TypedDict):
 
 
 def research_agent(state: TripState) -> TripState:
+    """Research agent: Gathers surf spot intelligence using tools.
+    
+    This agent is instrumented for Arize AX observability with:
+    - Proper OpenInference span kind (AGENT)
+    - Input/output tracking
+    - Prompt template versioning
+    - Error handling and status reporting
+    - Metadata for filtering and analysis
+    """
     req = state["trip_request"]
     destination = req["destination"]
     prompt_t = (
@@ -542,45 +568,90 @@ def research_agent(state: TripState) -> TripState:
     calls: List[Dict[str, Any]] = []
     tool_results = []
     
-    # Agent metadata and prompt template instrumentation
-    with using_attributes(tags=["surf_research", "spot_intel"]):
+    # Enhanced agent instrumentation with OpenInference semantic conventions
+    with using_attributes(
+        tags=["surf_research", "spot_intel", "agent_node"],
+        metadata={"agent_name": "research_agent", "destination": destination}
+    ):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
-                current_span.set_attribute("metadata.agent_type", "surf_research")
-                current_span.set_attribute("metadata.agent_node", "research_agent")
+                # Set OpenInference span kind for proper visualization in Arize
+                current_span.set_attribute(
+                    SpanAttributes.OPENINFERENCE_SPAN_KIND, 
+                    OpenInferenceSpanKindValues.AGENT.value
+                )
+                # Add agent metadata
+                current_span.set_attribute("agent.type", "research_agent")
+                current_span.set_attribute("agent.role", "surf_spot_researcher")
+                current_span.set_attribute("agent.destination", destination)
+                # Track input
+                current_span.set_attribute(SpanAttributes.INPUT_VALUE, destination)
+                current_span.add_event("Research agent started", {
+                    "destination": destination,
+                    "tools_available": len(tools)
+                })
         
-        with using_prompt_template(template=prompt_t, variables=vars_, version="v1"):
-            res = agent.invoke(messages)
-    
-    # Collect tool calls and execute them
-    if getattr(res, "tool_calls", None):
-        for c in res.tool_calls:
-            calls.append({"agent": "research", "tool": c["name"], "args": c.get("args", {})})
+        try:
+            # Instrument the prompt template for Arize Playground integration
+            with using_prompt_template(template=prompt_t, variables=vars_, version="v1.0"):
+                res = agent.invoke(messages)
+            
+            # Collect tool calls and execute them
+            if getattr(res, "tool_calls", None):
+                if _TRACING:
+                    current_span = trace.get_current_span()
+                    if current_span:
+                        current_span.add_event(f"Agent calling {len(res.tool_calls)} tools")
+                
+                for c in res.tool_calls:
+                    calls.append({"agent": "research", "tool": c["name"], "args": c.get("args", {})})
+                
+                tool_node = ToolNode(tools)
+                tr = tool_node.invoke({"messages": [res]})
+                tool_results = tr["messages"]
+                
+                # Add tool results to conversation and ask LLM to synthesize
+                messages.append(res)
+                messages.extend(tool_results)
+                
+                synthesis_prompt = "Based on the above information, provide a comprehensive summary for the traveler."
+                messages.append(SystemMessage(content=synthesis_prompt))
+                
+                # Instrument synthesis LLM call with its own prompt template
+                synthesis_vars = {"destination": destination, "context": "tool_results"}
+                with using_prompt_template(template=synthesis_prompt, variables=synthesis_vars, version="v1.0-synthesis"):
+                    final_res = llm.invoke(messages)
+                out = final_res.content
+            else:
+                out = res.content
+            
+            # Track successful completion
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_attribute(SpanAttributes.OUTPUT_VALUE, out[:500])  # Truncate for span size
+                    current_span.set_attribute("agent.tool_calls_count", len(calls))
+                    current_span.set_status(Status(StatusCode.OK))
+                    current_span.add_event("Research agent completed successfully")
         
-        tool_node = ToolNode(tools)
-        tr = tool_node.invoke({"messages": [res]})
-        tool_results = tr["messages"]
-        
-        # Add tool results to conversation and ask LLM to synthesize
-        messages.append(res)
-        messages.extend(tool_results)
-        
-        synthesis_prompt = "Based on the above information, provide a comprehensive summary for the traveler."
-        messages.append(SystemMessage(content=synthesis_prompt))
-        
-        # Instrument synthesis LLM call with its own prompt template
-        synthesis_vars = {"destination": destination, "context": "tool_results"}
-        with using_prompt_template(template=synthesis_prompt, variables=synthesis_vars, version="v1-synthesis"):
-            final_res = llm.invoke(messages)
-        out = final_res.content
-    else:
-        out = res.content
+        except Exception as e:
+            # Handle errors and set span status
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_status(Status(StatusCode.ERROR, str(e)))
+                    current_span.record_exception(e)
+            raise
 
     return {"messages": [SystemMessage(content=out)], "research": out, "tool_calls": calls}
 
 
 def budget_agent(state: TripState) -> TripState:
+    """Budget agent: Analyzes surf trip costs and provides detailed breakdown.
+    
+    Instrumented with OpenInference for comprehensive budget tracking in Arize.
+    """
     req = state["trip_request"]
     destination, duration = req["destination"], req["duration"]
     budget = req.get("budget", "moderate")
@@ -597,53 +668,159 @@ def budget_agent(state: TripState) -> TripState:
     
     calls: List[Dict[str, Any]] = []
     
-    # Agent metadata and prompt template instrumentation
-    with using_attributes(tags=["surf_budget", "cost_analysis"]):
+    # Enhanced agent instrumentation
+    with using_attributes(
+        tags=["surf_budget", "cost_analysis", "agent_node"],
+        metadata={"agent_name": "budget_agent", "destination": destination, "budget_level": budget}
+    ):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
-                current_span.set_attribute("metadata.agent_type", "surf_budget")
-                current_span.set_attribute("metadata.agent_node", "budget_agent")
+                current_span.set_attribute(
+                    SpanAttributes.OPENINFERENCE_SPAN_KIND, 
+                    OpenInferenceSpanKindValues.AGENT.value
+                )
+                current_span.set_attribute("agent.type", "budget_agent")
+                current_span.set_attribute("agent.role", "cost_analyzer")
+                current_span.set_attribute("agent.destination", destination)
+                current_span.set_attribute("agent.duration", duration)
+                current_span.set_attribute("agent.budget_level", budget)
+                current_span.set_attribute(SpanAttributes.INPUT_VALUE, f"{destination}, {duration}, {budget}")
+                current_span.add_event("Budget agent started")
         
-        with using_prompt_template(template=prompt_t, variables=vars_, version="v1"):
-            res = agent.invoke(messages)
-    
-    if getattr(res, "tool_calls", None):
-        for c in res.tool_calls:
-            calls.append({"agent": "budget", "tool": c["name"], "args": c.get("args", {})})
+        try:
+            with using_prompt_template(template=prompt_t, variables=vars_, version="v1.0"):
+                res = agent.invoke(messages)
+            
+            if getattr(res, "tool_calls", None):
+                if _TRACING:
+                    current_span = trace.get_current_span()
+                    if current_span:
+                        current_span.add_event(f"Agent calling {len(res.tool_calls)} tools")
+                
+                for c in res.tool_calls:
+                    calls.append({"agent": "budget", "tool": c["name"], "args": c.get("args", {})})
+                
+                tool_node = ToolNode(tools)
+                tr = tool_node.invoke({"messages": [res]})
+                
+                # Add tool results and ask for synthesis
+                messages.append(res)
+                messages.extend(tr["messages"])
+                
+                synthesis_prompt = f"Create a detailed budget breakdown for {duration} in {destination} with a {budget} budget."
+                messages.append(SystemMessage(content=synthesis_prompt))
+                
+                synthesis_vars = {"duration": duration, "destination": destination, "budget": budget}
+                with using_prompt_template(template=synthesis_prompt, variables=synthesis_vars, version="v1.0-synthesis"):
+                    final_res = llm.invoke(messages)
+                out = final_res.content
+            else:
+                out = res.content
+            
+            # Track completion
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_attribute(SpanAttributes.OUTPUT_VALUE, out[:500])
+                    current_span.set_attribute("agent.tool_calls_count", len(calls))
+                    current_span.set_status(Status(StatusCode.OK))
+                    current_span.add_event("Budget agent completed successfully")
         
-        tool_node = ToolNode(tools)
-        tr = tool_node.invoke({"messages": [res]})
-        
-        # Add tool results and ask for synthesis
-        messages.append(res)
-        messages.extend(tr["messages"])
-        
-        synthesis_prompt = f"Create a detailed budget breakdown for {duration} in {destination} with a {budget} budget."
-        messages.append(SystemMessage(content=synthesis_prompt))
-        
-        # Instrument synthesis LLM call
-        synthesis_vars = {"duration": duration, "destination": destination, "budget": budget}
-        with using_prompt_template(template=synthesis_prompt, variables=synthesis_vars, version="v1-synthesis"):
-            final_res = llm.invoke(messages)
-        out = final_res.content
-    else:
-        out = res.content
+        except Exception as e:
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_status(Status(StatusCode.ERROR, str(e)))
+                    current_span.record_exception(e)
+            raise
 
     return {"messages": [SystemMessage(content=out)], "budget": out, "tool_calls": calls}
 
 
 def local_agent(state: TripState) -> TripState:
+    """Local agent: Discovers surf culture and curated spots using RAG + tools.
+    
+    This agent demonstrates RAG instrumentation with:
+    - RETRIEVER span kind for vector search operations
+    - Document retrieval tracking
+    - Context injection into prompts
+    - Combined RAG + tool calling workflow
+    """
     req = state["trip_request"]
     destination = req["destination"]
     surf_preferences = req.get("surf_preferences", "quality waves")
     skill_level = req.get("skill_level", "intermediate")
     travel_style = req.get("travel_style", "standard")
     
-    # RAG: Retrieve curated surf spots if enabled
+    # RAG: Retrieve curated surf spots if enabled (with instrumentation)
     context_lines = []
-    if ENABLE_RAG:
+    retrieved_docs_count = 0
+    
+    if ENABLE_RAG and _TRACING:
+        # Create a manual RETRIEVER span for the RAG operation
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span("rag_retrieval") as retriever_span:
+            retriever_span.set_attribute(
+                SpanAttributes.OPENINFERENCE_SPAN_KIND,
+                OpenInferenceSpanKindValues.RETRIEVER.value
+            )
+            retriever_span.set_attribute(SpanAttributes.INPUT_VALUE, f"{destination}, {surf_preferences}")
+            retriever_span.set_attribute("retrieval.destination", destination)
+            retriever_span.set_attribute("retrieval.preferences", surf_preferences)
+            retriever_span.add_event("Starting RAG retrieval")
+            
+            try:
+                retrieved = GUIDE_RETRIEVER.retrieve(destination, surf_preferences, k=3)
+                retrieved_docs_count = len(retrieved)
+                
+                if retrieved:
+                    context_lines.append("=== Curated Surf Spots (from database) ===")
+                    
+                    # Track retrieved documents with OpenInference semantic conventions
+                    for idx, item in enumerate(retrieved):
+                        content = item["content"]
+                        metadata = item["metadata"]
+                        source = metadata.get("source", "Unknown")
+                        score = item.get("score", 0.0)
+                        
+                        context_lines.append(f"{idx + 1}. {content}")
+                        context_lines.append(f"   Source: {source}")
+                        
+                        # Set document attributes for Arize visualization
+                        retriever_span.set_attribute(
+                            f"{SpanAttributes.RETRIEVAL_DOCUMENTS}.{idx}.{DocumentAttributes.DOCUMENT_CONTENT}",
+                            content[:200]  # Truncate for span size
+                        )
+                        retriever_span.set_attribute(
+                            f"{SpanAttributes.RETRIEVAL_DOCUMENTS}.{idx}.{DocumentAttributes.DOCUMENT_ID}",
+                            f"surf_spot_{idx}"
+                        )
+                        retriever_span.set_attribute(
+                            f"{SpanAttributes.RETRIEVAL_DOCUMENTS}.{idx}.{DocumentAttributes.DOCUMENT_SCORE}",
+                            score
+                        )
+                        retriever_span.set_attribute(
+                            f"{SpanAttributes.RETRIEVAL_DOCUMENTS}.{idx}.{DocumentAttributes.DOCUMENT_METADATA}",
+                            json_lib.dumps(metadata)
+                        )
+                    
+                    context_lines.append("=== End of Curated Surf Spots ===\n")
+                    retriever_span.set_attribute(SpanAttributes.OUTPUT_VALUE, f"Retrieved {retrieved_docs_count} documents")
+                    retriever_span.set_status(Status(StatusCode.OK))
+                    retriever_span.add_event(f"Successfully retrieved {retrieved_docs_count} documents")
+                else:
+                    retriever_span.set_attribute(SpanAttributes.OUTPUT_VALUE, "No documents retrieved")
+                    retriever_span.add_event("No matching documents found")
+            
+            except Exception as e:
+                retriever_span.set_status(Status(StatusCode.ERROR, str(e)))
+                retriever_span.record_exception(e)
+    
+    elif ENABLE_RAG:
+        # Non-traced RAG retrieval (when tracing is disabled)
         retrieved = GUIDE_RETRIEVER.retrieve(destination, surf_preferences, k=3)
+        retrieved_docs_count = len(retrieved)
         if retrieved:
             context_lines.append("=== Curated Surf Spots (from database) ===")
             for idx, item in enumerate(retrieved, 1):
@@ -679,45 +856,92 @@ def local_agent(state: TripState) -> TripState:
     
     calls: List[Dict[str, Any]] = []
     
-    # Agent metadata and prompt template instrumentation
-    with using_attributes(tags=["surf_culture", "local_scene"]):
+    # Enhanced agent instrumentation with RAG metadata
+    with using_attributes(
+        tags=["surf_culture", "local_scene", "rag_enhanced", "agent_node"],
+        metadata={
+            "agent_name": "local_agent",
+            "destination": destination,
+            "rag_enabled": ENABLE_RAG,
+            "retrieved_docs": retrieved_docs_count
+        }
+    ):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
-                current_span.set_attribute("metadata.agent_type", "surf_culture")
-                current_span.set_attribute("metadata.agent_node", "local_agent")
-                if ENABLE_RAG and context_text:
-                    current_span.set_attribute("metadata.rag_enabled", "true")
+                current_span.set_attribute(
+                    SpanAttributes.OPENINFERENCE_SPAN_KIND,
+                    OpenInferenceSpanKindValues.AGENT.value
+                )
+                current_span.set_attribute("agent.type", "local_agent")
+                current_span.set_attribute("agent.role", "culture_expert")
+                current_span.set_attribute("agent.destination", destination)
+                current_span.set_attribute("agent.skill_level", skill_level)
+                current_span.set_attribute("agent.rag_enabled", ENABLE_RAG)
+                current_span.set_attribute("agent.rag_docs_retrieved", retrieved_docs_count)
+                current_span.set_attribute(SpanAttributes.INPUT_VALUE, f"{destination}, {surf_preferences}, {skill_level}")
+                current_span.add_event("Local agent started with RAG context" if context_text else "Local agent started without RAG")
         
-        with using_prompt_template(template=prompt_t, variables=vars_, version="v1"):
-            res = agent.invoke(messages)
-    
-    if getattr(res, "tool_calls", None):
-        for c in res.tool_calls:
-            calls.append({"agent": "local", "tool": c["name"], "args": c.get("args", {})})
+        try:
+            with using_prompt_template(template=prompt_t, variables=vars_, version="v1.0"):
+                res = agent.invoke(messages)
+            
+            if getattr(res, "tool_calls", None):
+                if _TRACING:
+                    current_span = trace.get_current_span()
+                    if current_span:
+                        current_span.add_event(f"Agent calling {len(res.tool_calls)} tools")
+                
+                for c in res.tool_calls:
+                    calls.append({"agent": "local", "tool": c["name"], "args": c.get("args", {})})
+                
+                tool_node = ToolNode(tools)
+                tr = tool_node.invoke({"messages": [res]})
+                
+                # Add tool results and ask for synthesis
+                messages.append(res)
+                messages.extend(tr["messages"])
+                
+                synthesis_prompt = f"Create a curated list of surf experiences and local scene insights for {skill_level} surfers interested in {surf_preferences} with a {travel_style} approach."
+                messages.append(SystemMessage(content=synthesis_prompt))
+                
+                synthesis_vars = {"surf_preferences": surf_preferences, "skill_level": skill_level, "travel_style": travel_style, "destination": destination}
+                with using_prompt_template(template=synthesis_prompt, variables=synthesis_vars, version="v1.0-synthesis"):
+                    final_res = llm.invoke(messages)
+                out = final_res.content
+            else:
+                out = res.content
+            
+            # Track completion
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_attribute(SpanAttributes.OUTPUT_VALUE, out[:500])
+                    current_span.set_attribute("agent.tool_calls_count", len(calls))
+                    current_span.set_status(Status(StatusCode.OK))
+                    current_span.add_event("Local agent completed successfully")
         
-        tool_node = ToolNode(tools)
-        tr = tool_node.invoke({"messages": [res]})
-        
-        # Add tool results and ask for synthesis
-        messages.append(res)
-        messages.extend(tr["messages"])
-        
-        synthesis_prompt = f"Create a curated list of surf experiences and local scene insights for {skill_level} surfers interested in {surf_preferences} with a {travel_style} approach."
-        messages.append(SystemMessage(content=synthesis_prompt))
-        
-        # Instrument synthesis LLM call
-        synthesis_vars = {"surf_preferences": surf_preferences, "skill_level": skill_level, "travel_style": travel_style, "destination": destination}
-        with using_prompt_template(template=synthesis_prompt, variables=synthesis_vars, version="v1-synthesis"):
-            final_res = llm.invoke(messages)
-        out = final_res.content
-    else:
-        out = res.content
+        except Exception as e:
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_status(Status(StatusCode.ERROR, str(e)))
+                    current_span.record_exception(e)
+            raise
 
     return {"messages": [SystemMessage(content=out)], "local": out, "tool_calls": calls}
 
 
 def itinerary_agent(state: TripState) -> TripState:
+    """Itinerary agent: Synthesizes all agent outputs into final surf trip plan.
+    
+    This is the orchestrator agent that combines:
+    - Research agent output (surf conditions, forecasts)
+    - Budget agent output (cost breakdown)
+    - Local agent output (culture, RAG-enhanced spots)
+    
+    Fully instrumented for end-to-end observability in Arize.
+    """
     req = state["trip_request"]
     destination = req["destination"]
     duration = req["duration"]
@@ -741,36 +965,98 @@ def itinerary_agent(state: TripState) -> TripState:
         prompt_parts.append("User input: {user_input}")
     
     prompt_t = "\n".join(prompt_parts)
+    
+    # Prepare agent outputs with truncation
+    research_output = (state.get("research") or "")[:400]
+    budget_output = (state.get("budget") or "")[:400]
+    local_output = (state.get("local") or "")[:400]
+    
     vars_ = {
         "duration": duration,
         "destination": destination,
         "skill_level": skill_level,
         "surf_preferences": surf_preferences,
         "travel_style": travel_style,
-        "research": (state.get("research") or "")[:400],
-        "budget": (state.get("budget") or "")[:400],
-        "local": (state.get("local") or "")[:400],
+        "research": research_output,
+        "budget": budget_output,
+        "local": local_output,
         "user_input": user_input,
     }
     
-    # Add span attributes for better observability in Arize
-    # NOTE: using_attributes must be OUTER context for proper propagation
-    with using_attributes(tags=["surf_itinerary", "session_planning"]):
+    # Enhanced instrumentation for orchestrator agent
+    with using_attributes(
+        tags=["surf_itinerary", "session_planning", "orchestrator", "agent_node"],
+        metadata={
+            "agent_name": "itinerary_agent",
+            "destination": destination,
+            "duration": duration,
+            "skill_level": skill_level,
+            "has_user_input": bool(user_input)
+        }
+    ):
         if _TRACING:
             current_span = trace.get_current_span()
             if current_span:
-                current_span.set_attribute("metadata.itinerary", "true")
-                current_span.set_attribute("metadata.agent_type", "surf_itinerary")
-                current_span.set_attribute("metadata.agent_node", "itinerary_agent")
-                current_span.set_attribute("metadata.skill_level", skill_level)
-                if user_input:
-                    current_span.set_attribute("metadata.user_input", user_input)
+                # Set proper span kind for orchestrator
+                current_span.set_attribute(
+                    SpanAttributes.OPENINFERENCE_SPAN_KIND,
+                    OpenInferenceSpanKindValues.AGENT.value
+                )
+                current_span.set_attribute("agent.type", "itinerary_agent")
+                current_span.set_attribute("agent.role", "orchestrator")
+                current_span.set_attribute("agent.destination", destination)
+                current_span.set_attribute("agent.duration", duration)
+                current_span.set_attribute("agent.skill_level", skill_level)
+                current_span.set_attribute("agent.surf_preferences", surf_preferences)
+                current_span.set_attribute("agent.travel_style", travel_style)
+                
+                # Track input from previous agents
+                input_summary = {
+                    "destination": destination,
+                    "duration": duration,
+                    "has_research": bool(research_output),
+                    "has_budget": bool(budget_output),
+                    "has_local": bool(local_output),
+                    "user_input": user_input[:100] if user_input else None
+                }
+                current_span.set_attribute(SpanAttributes.INPUT_VALUE, json_lib.dumps(input_summary))
+                
+                # Add event markers for workflow visualization
+                current_span.add_event("Itinerary synthesis started", {
+                    "agents_completed": 3,
+                    "research_length": len(research_output),
+                    "budget_length": len(budget_output),
+                    "local_length": len(local_output)
+                })
         
-        # Prompt template wrapper for Arize Playground integration
-        with using_prompt_template(template=prompt_t, variables=vars_, version="v1"):
-            res = llm.invoke([SystemMessage(content=prompt_t.format(**vars_))])
+        try:
+            # Prompt template wrapper for Arize Playground integration
+            with using_prompt_template(template=prompt_t, variables=vars_, version="v1.0"):
+                res = llm.invoke([SystemMessage(content=prompt_t.format(**vars_))])
+            
+            output = res.content
+            
+            # Track successful completion
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_attribute(SpanAttributes.OUTPUT_VALUE, output[:500])
+                    current_span.set_attribute("output.length", len(output))
+                    current_span.set_status(Status(StatusCode.OK))
+                    current_span.add_event("Itinerary synthesis completed", {
+                        "output_length": len(output),
+                        "destination": destination
+                    })
+        
+        except Exception as e:
+            if _TRACING:
+                current_span = trace.get_current_span()
+                if current_span:
+                    current_span.set_status(Status(StatusCode.ERROR, str(e)))
+                    current_span.record_exception(e)
+            raise
     
-    return {"messages": [SystemMessage(content=res.content)], "final": res.content}
+    return {"messages": [SystemMessage(content=output)], "final": output}
 
 
 def build_graph():
@@ -820,54 +1106,167 @@ def health():
     return {"status": "healthy", "service": "ai-surf-trip-planner"}
 
 
-# Initialize tracing once at startup, not per request
+# Initialize Arize AX tracing once at startup (not per request)
+# This enables comprehensive observability for the multi-agent system
 if _TRACING:
     try:
         space_id = os.getenv("ARIZE_SPACE_ID")
         api_key = os.getenv("ARIZE_API_KEY")
         if space_id and api_key:
-            tp = register(space_id=space_id, api_key=api_key, project_name="ai-surf-trip-planner")
-            LangChainInstrumentor().instrument(tracer_provider=tp, include_chains=True, include_agents=True, include_tools=True)
-            LiteLLMInstrumentor().instrument(tracer_provider=tp, skip_dep_check=True)
-    except Exception:
+            # Register with Arize using the convenience function
+            tp = register(
+                space_id=space_id, 
+                api_key=api_key
+            )
+            
+            # Configure trace settings (optional: hide sensitive data)
+            trace_config = TraceConfig(
+                hide_inputs=False,
+                hide_outputs=False,
+                hide_input_messages=False,
+                hide_output_messages=False,
+                hide_input_images=True,  # Hide image data if any
+                hide_embedding_vectors=False,  # Show embeddings for RAG debugging
+            )
+            
+            # Auto-instrument LangChain (includes LangGraph)
+            LangChainInstrumentor().instrument(
+                tracer_provider=tp,
+                config=trace_config,
+                include_chains=True,
+                include_agents=True,
+                include_tools=True
+            )
+            
+            # Auto-instrument OpenAI for deeper LLM traces
+            OpenAIInstrumentor().instrument(
+                tracer_provider=tp,
+                config=trace_config
+            )
+            
+            # Auto-instrument LiteLLM (if using other providers via LiteLLM)
+            LiteLLMInstrumentor().instrument(
+                tracer_provider=tp,
+                config=trace_config,
+                skip_dep_check=True
+            )
+            
+            print("✅ Arize AX tracing initialized successfully")
+            print(f"   Project: ai-surf-trip-planner")
+            print(f"   View traces at: https://app.arize.com")
+    except Exception as e:
+        print(f"⚠️  Arize tracing initialization failed: {e}")
         pass
 
 @app.post("/plan-trip", response_model=TripResponse)
 def plan_trip(req: TripRequest):
+    """Plan a surf trip using multi-agent system.
+    
+    This endpoint orchestrates 4 specialized agents running in parallel via LangGraph.
+    All operations are traced to Arize AX for complete observability.
+    
+    Traces include:
+    - Session and user tracking
+    - Multi-agent workflow execution
+    - Tool calls and RAG retrieval
+    - LLM interactions with prompt templates
+    - Error handling and performance metrics
+    """
     graph = build_graph()
     
-    # Only include necessary fields in initial state
-    # Agent outputs (research, budget, local, final) will be added during execution
+    # Extract tracking metadata
+    session_id = req.session_id or f"session_{int(time.time())}"
+    user_id = req.user_id or "anonymous"
+    turn_idx = req.turn_index or 0
+    
+    # Prepare graph state
     state = {
         "messages": [],
         "trip_request": req.model_dump(),
         "tool_calls": [],
     }
     
-    # Add session and user tracking attributes to the trace
-    session_id = req.session_id
-    user_id = req.user_id
-    turn_idx = req.turn_index
+    # Build comprehensive tracking attributes
+    attrs_kwargs = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "metadata": {
+            "destination": req.destination,
+            "duration": req.duration,
+            "skill_level": req.skill_level or "intermediate",
+            "budget": req.budget or "moderate",
+            "turn_index": turn_idx
+        },
+        "tags": ["surf_trip_planner", "multi_agent", "langgraph"]
+    }
     
-    # Build attributes for session and user tracking
-    attrs_kwargs = {}
-    if session_id:
-        attrs_kwargs["session_id"] = session_id
-    if user_id:
-        attrs_kwargs["user_id"] = user_id
+    # Wrap entire graph execution in a parent span for end-to-end tracing
+    if _TRACING:
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span("surf_trip_planner_workflow") as workflow_span:
+            # Set parent span attributes with OpenInference conventions
+            workflow_span.set_attribute(
+                SpanAttributes.OPENINFERENCE_SPAN_KIND,
+                OpenInferenceSpanKindValues.CHAIN.value  # Use CHAIN for workflow orchestration
+            )
+            workflow_span.set_attribute("workflow.type", "multi_agent_langgraph")
+            workflow_span.set_attribute("workflow.name", "surf_trip_planner")
+            workflow_span.set_attribute("workflow.agents_count", 4)
+            workflow_span.set_attribute("session.id", session_id)
+            workflow_span.set_attribute("user.id", user_id)
+            workflow_span.set_attribute("turn.index", turn_idx)
+            
+            # Track input parameters
+            input_data = {
+                "destination": req.destination,
+                "duration": req.duration,
+                "budget": req.budget,
+                "skill_level": req.skill_level,
+                "surf_preferences": req.surf_preferences,
+                "travel_style": req.travel_style
+            }
+            workflow_span.set_attribute(SpanAttributes.INPUT_VALUE, json_lib.dumps(input_data))
+            workflow_span.add_event("Multi-agent workflow started", input_data)
+            
+            try:
+                # Execute the LangGraph workflow with session context
+                with using_attributes(**attrs_kwargs):
+                    start_time = time.time()
+                    out = graph.invoke(state)
+                    execution_time = time.time() - start_time
+                
+                # Track successful completion
+                result = out.get("final", "")
+                tool_calls = out.get("tool_calls", [])
+                
+                workflow_span.set_attribute(SpanAttributes.OUTPUT_VALUE, result[:500])
+                workflow_span.set_attribute("workflow.execution_time_seconds", round(execution_time, 2))
+                workflow_span.set_attribute("workflow.tool_calls_total", len(tool_calls))
+                workflow_span.set_attribute("workflow.output_length", len(result))
+                workflow_span.set_status(Status(StatusCode.OK))
+                workflow_span.add_event("Multi-agent workflow completed", {
+                    "execution_time": round(execution_time, 2),
+                    "tool_calls": len(tool_calls),
+                    "output_length": len(result)
+                })
+                
+                return TripResponse(result=result, tool_calls=tool_calls)
+            
+            except Exception as e:
+                # Handle errors with proper span status
+                workflow_span.set_status(Status(StatusCode.ERROR, str(e)))
+                workflow_span.record_exception(e)
+                workflow_span.add_event("Workflow execution failed", {
+                    "error": str(e),
+                    "error_type": type(e).__name__
+                })
+                raise HTTPException(status_code=500, detail=f"Trip planning failed: {str(e)}")
     
-    # Add turn_index as a custom span attribute if provided
-    if turn_idx is not None and _TRACING:
-        with using_attributes(**attrs_kwargs):
-            current_span = trace.get_current_span()
-            if current_span:
-                current_span.set_attribute("turn_index", turn_idx)
-            out = graph.invoke(state)
     else:
+        # Non-traced execution (when Arize is not configured)
         with using_attributes(**attrs_kwargs):
             out = graph.invoke(state)
-    
-    return TripResponse(result=out.get("final", ""), tool_calls=out.get("tool_calls", []))
+        return TripResponse(result=out.get("final", ""), tool_calls=out.get("tool_calls", []))
 
 
 if __name__ == "__main__":
